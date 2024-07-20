@@ -66,7 +66,7 @@
 #define	mem	VVAR(_mem.m_storage)
 
 
-#define	MEM_ADDR_BITS	7
+#define	MEM_ADDR_BITS	8
 #define	CMEMMSK		((1<<(MEM_ADDR_BITS))-1)
 #define	WMEMMSK		(CMEMMSK >> 2)
 #define	HALFMEM		(1<<(MEM_ADDR_BITS-1))
@@ -356,7 +356,7 @@ int	main(int argc, char **argv) {
 	do {
 		tb->tick();
 	} while(0 == tb->m_core->o_int);
-	
+
 	tb->wb_read(R_MEM, (unsigned)sizeof(buf)/4, (unsigned *)tbuf);
 	for(unsigned i=0; i<HALFMEM; i++) {
 		int	adr = i & -4;

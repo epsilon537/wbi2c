@@ -89,6 +89,7 @@ module wbi2cmaster #(
     // {{{
     parameter [0:0] CONSTANT_SPEED = 1'b0,
     READ_ONLY = 1'b0,
+    LITTLE_ENDIAN = 1'b0,
     parameter [5:0] TICKBITS = 6'd20,
     parameter [(TICKBITS-1):0] CLOCKS_PER_TICK = 20'd1000,
     parameter MEM_ADDR_BITS = 7
@@ -261,12 +262,21 @@ module wbi2cmaster #(
       if (ll_i2c_ack) begin
         wr_data <= {(4) {ll_i2c_rx_data}};
         wr_addr <= newadr[(MEM_ADDR_BITS-1):0];
-        case (newadr[1:0])
-          2'b00: wr_sel <= 4'b1000;
-          2'b01: wr_sel <= 4'b0100;
-          2'b10: wr_sel <= 4'b0010;
-          2'b11: wr_sel <= 4'b0001;
-        endcase
+        if (LITTLE_ENDIAN)
+          case (newadr[1:0])
+            2'b11: wr_sel <= 4'b1000;
+            2'b10: wr_sel <= 4'b0100;
+            2'b01: wr_sel <= 4'b0010;
+            2'b00: wr_sel <= 4'b0001;
+          endcase
+        else
+          case (newadr[1:0])
+            2'b00: wr_sel <= 4'b1000;
+            2'b01: wr_sel <= 4'b0100;
+            2'b10: wr_sel <= 4'b0010;
+            2'b11: wr_sel <= 4'b0001;
+          endcase
+
         newadr <= newadr + 1'b1;
         wr_inc <= 1'b1;
       end
@@ -339,12 +349,20 @@ module wbi2cmaster #(
       rd_sel  <= rd_addr[1:0];
     end
 
-    case (rd_sel)
-      2'b00: rd_byte <= rd_word[31:24];
-      2'b01: rd_byte <= rd_word[23:16];
-      2'b10: rd_byte <= rd_word[15:8];
-      2'b11: rd_byte <= rd_word[7:0];
-    endcase
+    if (LITTLE_ENDIAN)
+      case (rd_sel)
+        2'b11: rd_byte <= rd_word[31:24];
+        2'b10: rd_byte <= rd_word[23:16];
+        2'b01: rd_byte <= rd_word[15:8];
+        2'b00: rd_byte <= rd_word[7:0];
+      endcase
+    else
+      case (rd_sel)
+        2'b00: rd_byte <= rd_word[31:24];
+        2'b01: rd_byte <= rd_word[23:16];
+        2'b10: rd_byte <= rd_word[15:8];
+        2'b11: rd_byte <= rd_word[7:0];
+      endcase
   end
   // }}}
 
