@@ -11,52 +11,53 @@
 //
 // Registers:
 //
-//  0,CMD  This is the command register.  Writes to this register will
-//    initiate an I2C bus transaction.
+// I2C_MASTER_CMD: Command Register and bitfields
+// Word address offset 0.
+// #define I2C_MASTER_CMD_BUSY 0x80000000
+// #define I2C_MASTER_CMD_ERR  0x40000000
+// #define I2C_MASTER_CMD_SLV_ADDR_OFFSET 17
+// #define I2C_MASTER_CMD_SLV_ADDR_MASK 0x00fe0000
+// #define I2C_MASTER_CMD_RD   0x00010000
+// #define I2C_MASTER_CMD_WR   0x00000000
+// #define I2C_MASTER_CMD_START_ADDR_OFFSET 8
+// #define I2C_MASTER_CMD_START_ADDR_MASK 0x0000ff00 /*Initial address to read from or write to.*/
+// #define I2C_MASTER_CMD_NUM_BYTES_OFFSET 0
+// #define I2C_MASTER_CMD_NUM_BYTES_MASK 0xff /*Number of bytes to read/write*/
 //
-//     bits
-//    15  Writing a '1' to this bit will reset the interface,
-//      and abandon any transaction currently underway.
-//    14.. 8  Number of values to read or write.  Ignored if zero.
-//     7.. 1  Initial address to read from or write to
-//         0  1 if reading from the slave, 0 if writing to it
+// I2C_MASTER_SPD: Speed Register:
+// The programmable number of system clocks per I2C wait state.
+// Nominally, this is one quarter the clock period of the I2C bus.
+// Word address offset 1
+// #define I2C_MASTER_SPD_MASK 0xfffff /*Max. 20 bits*/
 //
-//    On read, bits 14.. 8 will indicate the number of bytes
-//      remaining to be read or written.  A 0 indicates the
-//      interface is idle.
+// I2C_ISR: Interrupt Status Register:
+// Word address offset 2
+// #define I2C_ISR_BUSY 0x00000001 : Set when I2C goes from busy to idle
+// state. Writing to I2C_ISR clears the bit.
 //
-//    DEVICE ADDRESS (up to two bytes ?)
-//      R/W
-//    Address within the device (up to two bytes?)
-//    Data address (one byte only)
-//    Number of bytes to transmit (one byte)
+// I2C_IEN: Interrtup Enable Register:
+// Word address offset 3
+// #define I2C_IEN_BUSY 0x00000001 : Set to enable IRQ generation when I2C
+// goes from busy to idle state.
 //
-//    Simple commands: DEV(R/W), Addr, NBytes
-//    On read: DEV(R/W), and addr, if the address was accepted, and
-//      references where the address pointer is at.
-//       BUSY bit  bit[31]
-//       ERR bit  bit[30]
-//    NBytes is the number of bytes remaining in the transfer.
+// I2C_MASTER_MEM_BASE: Local copy of the memory shared between the master
+// and the slave.  When commanded to initiate a bus transaction,
+// the bus controller will read from or write to this memory.
+// In all other cases, it is completely accessable from the WB
+// bus.
+// Word address offset (1<<(MEM_ADDR_BITS-2))
+// E.g is MEMD_ADDR_BITS=8, the memory starts at word address
+// 64 (byte address 256).
+// I2C_MASTER_MEM_SIZE_BYTES (1<<MEM_ADDR_BITS)
 //
-//    Features (not yet) supported:
-//      2-byte device addresses
-//      device addresses that don't match their memory addresses
-//
-//  1,SPD  Indicates the number of clocks per I2C bit.  This is a 20-bit
-//    number that cannot be zero.  The actual speed of the port,
-//    given this number, will be the system CLKFREQHZ/SPD.
-//
-//  2-17  address mapped onto 0-1.
-//
-//  128-255  This is the local copy of the memory shared between the master
-//    and the slave.  When commanded to initiate a bus transaction,
-//    the bus controller will read from or write to this memory.
-//    In all other cases, it is completely accessable from the WB
-//    bus.
-//
-//
-// Creator:  Dan Gisselquist, Ph.D.
+// Original Creator:  Dan Gisselquist, Ph.D.
 //    Gisselquist Technology, LLC
+//
+// BoxLambda modifications by Epsilon537:
+// - Add reset logic
+// - Add ISR and IEN interrupt control registers
+// - Add LITTLE_ENDIAN support
+// - Add register interface documentation
 //
 ////////////////////////////////////////////////////////////////////////////////
 // }}}
@@ -87,12 +88,12 @@
 // }}}
 module wbi2cmaster #(
     // {{{
-    parameter [0:0] CONSTANT_SPEED = 1'b0,
-    READ_ONLY = 1'b0,
-    LITTLE_ENDIAN = 1'b0,
-    parameter [5:0] TICKBITS = 6'd20,
-    parameter [(TICKBITS-1):0] CLOCKS_PER_TICK = 20'd1000,
-    parameter MEM_ADDR_BITS = 7
+    parameter [0:0] CONSTANT_SPEED = 1'b0, //If set, I2C bus speed is not configurable through the I2C_MASTER_SPEED register.
+    READ_ONLY = 1'b0,  //If set, only implement read transactions.
+    LITTLE_ENDIAN = 1'b0, //If set, the host CPU interfacing with the wbi2cmaster is little endian. If clear, the host CPU is big endian.
+    parameter [5:0] TICKBITS = 6'd20,  //Number of bits of the speed register.
+    parameter [(TICKBITS-1):0] CLOCKS_PER_TICK = 20'd1000,  //Default speed register setting.
+    parameter MEM_ADDR_BITS = 7 //Local memory address size. Local memory size is (1<<MEM_ADDR_BITS).
     // }}}
 ) (
     // {{{
@@ -167,6 +168,9 @@ module wbi2cmaster #(
   //
   reg r_busy;
 
+  // IRQ control
+  reg isr, ien;
+
   reg last_op;
   reg rd_inc;
   reg last_err;
@@ -199,6 +203,7 @@ module wbi2cmaster #(
 
   lli2cm lowlvl (
       i_clk,
+      i_reset,
       r_speed,
       ll_i2c_cyc,
       ll_i2c_stb,
@@ -232,68 +237,91 @@ module wbi2cmaster #(
   initial newadr = 0;
   initial r_speed = CLOCKS_PER_TICK;
   initial zero_speed_err = 1'b0;
+  initial isr = 1'b0;
+  initial ien = 1'b0;
+
   always @(posedge i_clk) begin  // Writes from the master wishbone bus
-    start_request <= 1'b0;
-    if ((i_wb_stb) && (i_wb_we) && (!r_busy) && (!i_wb_addr[(MEM_ADDR_BITS-2)])) begin
-      if (!i_wb_addr[0])  // &&(MEM_ADDR_BITS <= 8)
-      begin
-        newdev <= i_wb_data[23:17];
-        newrx_txn <= i_wb_data[16];
-        newadr <= i_wb_data[(8+MEM_ADDR_BITS-1):8];
+    if (i_reset) begin
+      start_request <= 1'b0;
+      newdev <= 7'h0;
+      newrx_txn <= 1'b0;
+      newadr <= 0;
+      r_speed <= CLOCKS_PER_TICK;
+      zero_speed_err <= 1'b0;
+      isr <= 1'b0;
+      ien <= 1'b0;
+    end else begin
+      start_request <= 1'b0;
+      //If write to register (as opposed to local memory)
+      if ((i_wb_stb) && (i_wb_we) && (!r_busy) && (!i_wb_addr[(MEM_ADDR_BITS-2)])) begin
+        //If Command Register
+        if (i_wb_addr[1:0] == 2'b00)  // &&(MEM_ADDR_BITS <= 8)
+        begin
+          newdev <= i_wb_data[23:17];
+          newrx_txn <= i_wb_data[16];
+          newadr <= i_wb_data[(8+MEM_ADDR_BITS-1):8];
 
-        start_request <= (i_wb_data[(MEM_ADDR_BITS-1):0] != 0) && ((!READ_ONLY) || (i_wb_data[16]));
-        // end else if ((MEM_ADDR_BITS > 8)&&(!i_wb_addr))
-        // begin
-        //  newdev     <= i_wb_data[27:21];
-        //  newrx_txn  <= i_wb_data[20];
-        //  newadr    <= i_wb_data[(12+MEM_ADDR_BITS-1):12];
+          start_request <= (i_wb_data[(MEM_ADDR_BITS-1):0] != 0) && ((!READ_ONLY) || (i_wb_data[16]));
+          // end else if ((MEM_ADDR_BITS > 8)&&(!i_wb_addr))
+          // begin
+          //  newdev     <= i_wb_data[27:21];
+          //  newrx_txn  <= i_wb_data[20];
+          //  newadr    <= i_wb_data[(12+MEM_ADDR_BITS-1):12];
 
-        //  start_request <= (i_wb_data[(MEM_ADDR_BITS-1):0] != 0)
-        //    &&((!READ_ONLY)||(i_wb_data[20]));
+          //  start_request <= (i_wb_data[(MEM_ADDR_BITS-1):0] != 0)
+          //    &&((!READ_ONLY)||(i_wb_data[20]));
+        end
+
+        //If Speed Register
+        if ((i_wb_addr[1:0] == 2'b01) && (!CONSTANT_SPEED)) r_speed <= i_wb_data[(TICKBITS-1):0];
+
+        //If ISR Register
+        if (i_wb_addr[1:0] == 2'b10) isr <= 1'b0;
+
+        //If IEN Register
+        if (i_wb_addr[1:0] == 2'b11) ien <= i_wb_data[0];
+
+        //Write to local memory...
+      end else if (zero_speed_err) r_speed <= CLOCKS_PER_TICK;
+      zero_speed_err <= (r_speed == 0);
+      wr_sel <= 4'h0;
+      wr_inc <= 1'b0;
+      if (r_write_lock) begin
+        if (ll_i2c_ack) begin
+          wr_data <= {(4) {ll_i2c_rx_data}};
+          wr_addr <= newadr[(MEM_ADDR_BITS-1):0];
+          if (LITTLE_ENDIAN)
+            case (newadr[1:0])
+              2'b11: wr_sel <= 4'b1000;
+              2'b10: wr_sel <= 4'b0100;
+              2'b01: wr_sel <= 4'b0010;
+              2'b00: wr_sel <= 4'b0001;
+            endcase
+          else
+            case (newadr[1:0])
+              2'b00: wr_sel <= 4'b1000;
+              2'b01: wr_sel <= 4'b0100;
+              2'b10: wr_sel <= 4'b0010;
+              2'b11: wr_sel <= 4'b0001;
+            endcase
+
+          newadr <= newadr + 1'b1;
+          wr_inc <= 1'b1;
+        end
+      end else if (!READ_ONLY) begin
+        wr_data <= i_wb_data;
+        wr_sel  <= ((i_wb_stb) && (i_wb_we) && (i_wb_addr[MEM_ADDR_BITS-2])) ? i_wb_sel : 4'h0;
+        wr_addr <= {i_wb_addr[(MEM_ADDR_BITS-3):0], 2'b00};
       end
 
-      if ((i_wb_addr[0]) && (!CONSTANT_SPEED)) r_speed <= i_wb_data[(TICKBITS-1):0];
-    end else if (zero_speed_err) r_speed <= CLOCKS_PER_TICK;
-    zero_speed_err <= (r_speed == 0);
-
-    wr_sel <= 4'h0;
-    wr_inc <= 1'b0;
-    if (r_write_lock) begin
-      if (ll_i2c_ack) begin
-        wr_data <= {(4) {ll_i2c_rx_data}};
-        wr_addr <= newadr[(MEM_ADDR_BITS-1):0];
-        if (LITTLE_ENDIAN)
-          case (newadr[1:0])
-            2'b11: wr_sel <= 4'b1000;
-            2'b10: wr_sel <= 4'b0100;
-            2'b01: wr_sel <= 4'b0010;
-            2'b00: wr_sel <= 4'b0001;
-          endcase
-        else
-          case (newadr[1:0])
-            2'b00: wr_sel <= 4'b1000;
-            2'b01: wr_sel <= 4'b0100;
-            2'b10: wr_sel <= 4'b0010;
-            2'b11: wr_sel <= 4'b0001;
-          endcase
-
-        newadr <= newadr + 1'b1;
-        wr_inc <= 1'b1;
-      end
-    end else if (!READ_ONLY) begin
-      wr_data <= i_wb_data;
-      wr_sel  <= ((i_wb_stb) && (i_wb_we) && (i_wb_addr[MEM_ADDR_BITS-2])) ? i_wb_sel : 4'h0;
-      wr_addr <= {i_wb_addr[(MEM_ADDR_BITS-3):0], 2'b00};
+      if (wr_sel[3]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][31:24] <= wr_data[31:24];
+      if (wr_sel[2]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][23:16] <= wr_data[23:16];
+      if (wr_sel[1]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][15:8] <= wr_data[15:8];
+      if (wr_sel[0]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][7:0] <= wr_data[7:0];
     end
-
-    if (wr_sel[3]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][31:24] <= wr_data[31:24];
-    if (wr_sel[2]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][23:16] <= wr_data[23:16];
-    if (wr_sel[1]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][15:8] <= wr_data[15:8];
-    if (wr_sel[0]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][7:0] <= wr_data[7:0];
   end
   // }}}
 
-  initial rd_inc = 1'b0;
 
   // w_wb_status
   // {{{
@@ -310,8 +338,9 @@ module wbi2cmaster #(
   // o_wb_data
   // {{{
   always @(posedge i_clk) begin  // Read values and place them on the master wishbone bus.
-    if ((i_wb_stb) && (i_wb_we) && (!r_busy) && (!i_wb_addr[0])) begin
-      count_left <= i_wb_data[(MEM_ADDR_BITS-1):0];
+    //If write to Command Register
+    if ((i_wb_stb) && (i_wb_we) && (!r_busy) && (i_wb_addr[1:0] == 2'b00)) begin
+      count_left <= i_wb_data[(MEM_ADDR_BITS-1):0];  //Num. bytes
       last_op <= 1'b0;
     end else last_op <= (count_left[(MEM_ADDR_BITS-1):0] == 0);
     if (wr_inc) begin
@@ -325,11 +354,13 @@ module wbi2cmaster #(
     end
 
     casez ({
-      i_wb_addr[(MEM_ADDR_BITS-2)], i_wb_addr[0]
+      i_wb_addr[(MEM_ADDR_BITS-2)], i_wb_addr[1:0]
     })
-      2'b00: o_wb_data <= w_wb_status;
-      2'b01: o_wb_data <= {{(32 - TICKBITS) {1'b0}}, r_speed};
-      2'b1?: o_wb_data <= mem[i_wb_addr[(MEM_ADDR_BITS-3):0]];
+      3'b000: o_wb_data <= w_wb_status;
+      3'b001: o_wb_data <= {{(32 - TICKBITS) {1'b0}}, r_speed};
+      3'b010: o_wb_data <= {31'b0, isr};
+      3'b011: o_wb_data <= {31'b0, ien};
+      3'b1??: o_wb_data <= mem[i_wb_addr[(MEM_ADDR_BITS-3):0]];
     endcase
   end
   // }}}
@@ -378,147 +409,161 @@ module wbi2cmaster #(
     if (MEM_ADDR_BITS < 8) assign w_byte_addr[7:(MEM_ADDR_BITS)] = 0;
   endgenerate
 
+  initial rd_inc = 1'b0;
   initial r_write_lock = 1'b0;
   initial mstate = I2MIDLE;
   initial r_busy = 1'b0;
   always @(posedge i_clk) begin
-    if (!ll_i2c_cyc) last_addr_flag <= 1'b0;
-    else if (last_op) last_addr_flag <= 1'b1;
-    rd_stb <= 1'b0;
+    if (i_reset) begin
+      rd_inc <= 1'b0;
+      r_write_lock <= 1'b0;
+      mstate <= I2MIDLE;
+      r_busy <= 1'b0;
+    end else begin
+      if (!ll_i2c_cyc) last_addr_flag <= 1'b0;
+      else if (last_op) last_addr_flag <= 1'b1;
+      rd_stb <= 1'b0;
 
-    if ((!r_busy) && (i_wb_stb) && (!i_wb_addr[0]) && (!i_wb_addr[(MEM_ADDR_BITS-2)]))
-      last_err <= 1'b0;
-    else if ((r_busy) && (ll_i2c_err)) last_err <= 1'b1;
+      //If Comand Register access
+      if ((!r_busy) && (i_wb_stb) && (i_wb_addr[1:0] == 2'b00) && (!i_wb_addr[(MEM_ADDR_BITS-2)]))
+        last_err <= 1'b0;
+      else if ((r_busy) && (ll_i2c_err)) last_err <= 1'b1;
 
-    if (mstate == I2MIDLE) acks_pending <= 2'h0;
-    else
-      case ({
-        (ll_i2c_stb) && (!ll_i2c_stall), ll_i2c_ack
-      })
-        2'b00: acks_pending <= acks_pending;
-        2'b01: acks_pending <= (|acks_pending) ? (acks_pending - 1'b1) : 0;
-        2'b10: acks_pending <= acks_pending + 1'b1;
-        2'b11: acks_pending <= acks_pending;
-      endcase
+      if (mstate == I2MIDLE) acks_pending <= 2'h0;
+      else
+        case ({
+          (ll_i2c_stb) && (!ll_i2c_stall), ll_i2c_ack
+        })
+          2'b00: acks_pending <= acks_pending;
+          2'b01: acks_pending <= (|acks_pending) ? (acks_pending - 1'b1) : 0;
+          2'b10: acks_pending <= acks_pending + 1'b1;
+          2'b11: acks_pending <= acks_pending;
+        endcase
 
-    last_ack <= (acks_pending[1] == 1'b0) && (!ll_i2c_stb);
+      last_ack <= (acks_pending[1] == 1'b0) && (!ll_i2c_stb);
 
-    rd_inc   <= 1'b0;
-    case (mstate)
-      I2MIDLE: begin
-        ll_i2c_cyc   <= 1'b0;
-        ll_i2c_stb   <= 1'b0;
-        r_write_lock <= 1'b0;
-        if ((start_request) && (!ll_i2c_stall)) begin
-          ll_i2c_cyc <= 1'b1;
-          ll_i2c_stb <= 1'b1;
-          ll_i2c_we <= 1'b1;
-          // We start, always, by writing the address out
-          ll_i2c_tx_data <= {newdev, 1'b0};
-          rd_addr <= newadr;
-          mstate <= I2MDEVADDR;
-          rd_stb <= 1'b1;
-          r_busy <= 1'b1;
-        end else r_busy <= ll_i2c_stall;
-      end
-      I2MDEVADDR: begin
-        r_write_lock <= 1'b0;
-        if (!ll_i2c_stall) begin
-          ll_i2c_we <= 1'b1;  // Still writing
-          ll_i2c_stb <= 1'b1;
-          ll_i2c_tx_data <= w_byte_addr;
-          if (newrx_txn) mstate <= I2MRDSTOP;
-          else begin
-            mstate <= I2MTXDATA;
+      rd_inc   <= 1'b0;
+      case (mstate)
+        I2MIDLE: begin
+          ll_i2c_cyc   <= 1'b0;
+          ll_i2c_stb   <= 1'b0;
+          r_write_lock <= 1'b0;
+          if ((start_request) && (!ll_i2c_stall)) begin
+            ll_i2c_cyc <= 1'b1;
+            ll_i2c_stb <= 1'b1;
+            ll_i2c_we <= 1'b1;
+            // We start, always, by writing the address out
+            ll_i2c_tx_data <= {newdev, 1'b0};
+            rd_addr <= newadr;
+            mstate <= I2MDEVADDR;
+            rd_stb <= 1'b1;
+            r_busy <= 1'b1;
+          end else begin
+            r_busy <= ll_i2c_stall;
+            //if going from busy to idle...
+            if (r_busy && (!ll_i2c_stall)) isr <= 1'b1;
           end
         end
-        if (ll_i2c_err) begin
-          mstate <= I2MCLEANUP;
-          ll_i2c_stb <= 1'b0;
+        I2MDEVADDR: begin
+          r_write_lock <= 1'b0;
+          if (!ll_i2c_stall) begin
+            ll_i2c_we <= 1'b1;  // Still writing
+            ll_i2c_stb <= 1'b1;
+            ll_i2c_tx_data <= w_byte_addr;
+            if (newrx_txn) mstate <= I2MRDSTOP;
+            else begin
+              mstate <= I2MTXDATA;
+            end
+          end
+          if (ll_i2c_err) begin
+            mstate <= I2MCLEANUP;
+            ll_i2c_stb <= 1'b0;
+          end
         end
-      end
-      I2MRDSTOP: begin  // going to read, need to send the dev addr
-        // First thing we have to do is end our transaction
-        r_write_lock <= 1'b0;
-        if (!ll_i2c_stall) begin
-          ll_i2c_stb <= 1'b0;
-        end
+        I2MRDSTOP: begin  // going to read, need to send the dev addr
+          // First thing we have to do is end our transaction
+          r_write_lock <= 1'b0;
+          if (!ll_i2c_stall) begin
+            ll_i2c_stb <= 1'b0;
+          end
 
-        if ((!ll_i2c_stb) && (last_ack) && (ll_i2c_ack)) begin
-          ll_i2c_cyc <= 1'b0;
-          mstate <= I2MRDDEV;
+          if ((!ll_i2c_stb) && (last_ack) && (ll_i2c_ack)) begin
+            ll_i2c_cyc <= 1'b0;
+            mstate <= I2MRDDEV;
+          end
+          if (ll_i2c_err) begin
+            mstate <= I2MCLEANUP;
+            ll_i2c_stb <= 1'b0;
+          end
         end
-        if (ll_i2c_err) begin
-          mstate <= I2MCLEANUP;
-          ll_i2c_stb <= 1'b0;
+        I2MRDDEV: begin
+          ll_i2c_stb   <= 1'b0;
+          r_write_lock <= 1'b0;
+          if (!ll_i2c_stall) // Wait 'til its no longer busy
+        begin // Fire us up again
+            ll_i2c_cyc <= 1'b1;
+            ll_i2c_stb <= 1'b1;
+            ll_i2c_we <= 1'b1;
+            ll_i2c_tx_data <= {newdev, 1'b1};
+            mstate <= I2MRXDATA;
+            r_write_pause <= 2'b01;
+          end
+          if (ll_i2c_err) begin
+            mstate <= I2MCLEANUP;
+            ll_i2c_stb <= 1'b0;
+          end
         end
-      end
-      I2MRDDEV: begin
-        ll_i2c_stb   <= 1'b0;
-        r_write_lock <= 1'b0;
-        if (!ll_i2c_stall) // Wait 'til its no longer busy
-      begin // Fire us up again
-          ll_i2c_cyc <= 1'b1;
-          ll_i2c_stb <= 1'b1;
-          ll_i2c_we <= 1'b1;
-          ll_i2c_tx_data <= {newdev, 1'b1};
-          mstate <= I2MRXDATA;
-          r_write_pause <= 2'b01;
+        I2MTXDATA: begin  // We are sending to the slave
+          ll_i2c_stb   <= 1'b1;
+          r_write_lock <= 1'b0;
+          if (!ll_i2c_stall) begin
+            rd_inc <= 1'b1;
+            rd_addr <= rd_addr + 1'b1;
+            ll_i2c_tx_data <= rd_byte;
+            rd_stb <= 1'b1;
+            if (last_addr_flag) begin
+              ll_i2c_stb <= 1'b0;
+              mstate <= I2MCLEANUP;
+            end
+          end
+          if (ll_i2c_err) begin
+            mstate <= I2MCLEANUP;
+            ll_i2c_stb <= 1'b0;
+          end
         end
-        if (ll_i2c_err) begin
-          mstate <= I2MCLEANUP;
-          ll_i2c_stb <= 1'b0;
-        end
-      end
-      I2MTXDATA: begin  // We are sending to the slave
-        ll_i2c_stb   <= 1'b1;
-        r_write_lock <= 1'b0;
-        if (!ll_i2c_stall) begin
-          rd_inc <= 1'b1;
-          rd_addr <= rd_addr + 1'b1;
-          ll_i2c_tx_data <= rd_byte;
-          rd_stb <= 1'b1;
+        I2MRXDATA: begin
+          ll_i2c_we <= 1'b0;
+          if (!ll_i2c_stall) begin
+            if (|r_write_pause) r_write_pause <= r_write_pause - 1'b1;
+            r_write_lock   <= (r_write_pause == 2'b00);
+            ll_i2c_tx_data <= rd_byte;
+          end
           if (last_addr_flag) begin
             ll_i2c_stb <= 1'b0;
             mstate <= I2MCLEANUP;
           end
+          if (ll_i2c_err) begin
+            mstate <= I2MCLEANUP;
+            ll_i2c_stb <= 1'b0;
+          end
         end
-        if (ll_i2c_err) begin
-          mstate <= I2MCLEANUP;
-          ll_i2c_stb <= 1'b0;
-        end
-      end
-      I2MRXDATA: begin
-        ll_i2c_we <= 1'b0;
-        if (!ll_i2c_stall) begin
-          if (|r_write_pause) r_write_pause <= r_write_pause - 1'b1;
-          r_write_lock   <= (r_write_pause == 2'b00);
-          ll_i2c_tx_data <= rd_byte;
-        end
-        if (last_addr_flag) begin
-          ll_i2c_stb <= 1'b0;
-          mstate <= I2MCLEANUP;
-        end
-        if (ll_i2c_err) begin
-          mstate <= I2MCLEANUP;
-          ll_i2c_stb <= 1'b0;
-        end
-      end
-      I2MCLEANUP: begin
-        ll_i2c_cyc <= 1'b1;
-        ll_i2c_stb <= 1'b0;
-        if ((ll_i2c_we) && (ll_i2c_ack)) rd_inc <= 1'b1;
-        if (last_ack) begin
-          mstate <= I2MIDLE;
+        I2MCLEANUP: begin
           ll_i2c_cyc <= 1'b1;
+          ll_i2c_stb <= 1'b0;
+          if ((ll_i2c_we) && (ll_i2c_ack)) rd_inc <= 1'b1;
+          if (last_ack) begin
+            mstate <= I2MIDLE;
+            ll_i2c_cyc <= 1'b1;
+          end
         end
-      end
-      default: mstate <= I2MIDLE;
-    endcase
+        default: mstate <= I2MIDLE;
+      endcase
+    end
   end
   // }}}
 
-  assign o_int = !r_busy;
+  assign o_int = isr & ien;
+
   ////////////////////////////////////////////////////////////////////////
   //
   // Debug data
