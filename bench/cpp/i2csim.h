@@ -105,8 +105,11 @@ public:
     m_data = new char[m_memsz];
     m_last_sda = 1;
     m_last_scl = 1;
-    for(int i=0; i<m_memsz; i++)
-      m_data[i] = 0;
+
+    //Initial data pattern in slave is 00, 01, 02,...
+    for(int ii=0; ii<m_memsz; ii++)
+      m_data[ii] = (char)ii;
+
     m_addr = 0;
     m_illegal = false;
     m_state = I2CIDLE;
@@ -116,8 +119,6 @@ public:
 
     m_devaddr = ADDRESS;
     m_daddr = 0;
-
-    memset(m_data, 0, m_memsz);
   }
 
   I2CBUS  operator()(int scl, int sda);

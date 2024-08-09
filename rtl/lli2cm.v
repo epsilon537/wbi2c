@@ -1,17 +1,17 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-// Filename:	lli2cm.v
+// Filename:  lli2cm.v
 // {{{
-// Project:	WBI2C ... a set of Wishbone controlled I2C controller(s)
+// Project:  WBI2C ... a set of Wishbone controlled I2C controller(s)
 //
-// Purpose:	This is a lower level I2C driver for a master I2C byte-wise
-//		interface.  This particular interface is designed to handle
-//	all byte level ineraction with the actual port.  The external interface
-//	to this module is something akin to wishbone, although without the
-//	address register.
+// Purpose:  This is a lower level I2C driver for a master I2C byte-wise
+//    interface.  This particular interface is designed to handle
+//  all byte level ineraction with the actual port.  The external interface
+//  to this module is something akin to wishbone, although without the
+//  address register.
 //
-// Creator:	Dan Gisselquist, Ph.D.
-//		Gisselquist Technology, LLC
+// Creator:  Dan Gisselquist, Ph.D.
+//    Gisselquist Technology, LLC
 //
 ////////////////////////////////////////////////////////////////////////////////
 // }}}
@@ -32,9 +32,9 @@
 // target there if the PDF file isn't present.)  If not, see
 // <http://www.gnu.org/licenses/> for a copy.
 // }}}
-// License:	GPL, v3, as defined and found on www.gnu.org,
+// License:  GPL, v3, as defined and found on www.gnu.org,
 // {{{
-//		http://www.gnu.org/licenses/gpl.html
+//    http://www.gnu.org/licenses/gpl.html
 //
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -71,22 +71,22 @@ module lli2cm #(
 
   // Local declarations
   // {{{
-  localparam [3:0]	I2CMIDLE	= 4'h0,
-				I2CMSTART	= 4'h1,
-				I2CMBIT_SET	= 4'h2,
-				I2CMBIT_POSEDGE	= 4'h3,
-				I2CMBIT_NEGEDGE	= 4'h4,
-				I2CMBIT_CLR	= 4'h5,
-				I2CMACK_SET	= 4'h6,
-				I2CMACK_POSEDGE	= 4'h7,
-				I2CMACK_NEGEDGE	= 4'h8,
-				I2CMACK_CLR	= 4'h9,
-				I2CMRESTART	= 4'ha,
-				I2CMRESTART_POSEDGE= 4'hb,
-				I2CMRESTART_NEGEDGE= 4'hc,
-				I2CMSTOP	= 4'hd,
-				I2CMSTOPPD	= 4'he,
-				I2CMFINAL	= 4'hf;
+  localparam [3:0]  I2CMIDLE  = 4'h0,
+        I2CMSTART  = 4'h1,
+        I2CMBIT_SET  = 4'h2,
+        I2CMBIT_POSEDGE  = 4'h3,
+        I2CMBIT_NEGEDGE  = 4'h4,
+        I2CMBIT_CLR  = 4'h5,
+        I2CMACK_SET  = 4'h6,
+        I2CMACK_POSEDGE  = 4'h7,
+        I2CMACK_NEGEDGE  = 4'h8,
+        I2CMACK_CLR  = 4'h9,
+        I2CMRESTART  = 4'ha,
+        I2CMRESTART_POSEDGE= 4'hb,
+        I2CMRESTART_NEGEDGE= 4'hc,
+        I2CMSTOP  = 4'hd,
+        I2CMSTOPPD  = 4'he,
+        I2CMFINAL  = 4'hf;
 
   reg [(TICKBITS-1):0] clocks_per_tick;
 
@@ -301,9 +301,9 @@ module lli2cm #(
               o_busy <= 1'b0;
               r_we   <= i_we;
               r_data <= i_data;
-              //	if (r_we != i_we)
-              //		state <= I2CMRESTART;
-              //	else
+              //  if (r_we != i_we)
+              //    state <= I2CMRESTART;
+              //  else
               state  <= I2CMSTART;
               nbits  <= 0;
             end else if ((i_cyc) && (i_stb) && (!r_cyc)) state <= I2CMRESTART;

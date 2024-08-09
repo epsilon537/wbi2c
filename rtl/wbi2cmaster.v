@@ -318,10 +318,12 @@ module wbi2cmaster #(
       if (wr_sel[2]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][23:16] <= wr_data[23:16];
       if (wr_sel[1]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][15:8] <= wr_data[15:8];
       if (wr_sel[0]) mem[wr_addr[(MEM_ADDR_BITS-1):2]][7:0] <= wr_data[7:0];
+
+      //Set ISR if going from busy to idle.
+      if ((mstate == I2MIDLE) && r_busy && (!ll_i2c_stall)) isr <= 1'b1;
     end
   end
   // }}}
-
 
   // w_wb_status
   // {{{
@@ -460,8 +462,6 @@ module wbi2cmaster #(
             r_busy <= 1'b1;
           end else begin
             r_busy <= ll_i2c_stall;
-            //if going from busy to idle...
-            if (r_busy && (!ll_i2c_stall)) isr <= 1'b1;
           end
         end
         I2MDEVADDR: begin
